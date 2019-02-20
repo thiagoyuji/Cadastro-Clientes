@@ -1,0 +1,183 @@
+image: maven:latest
+
+stages:
+  - build
+  - test
+  - package
+  - create
+  - deploy
+  - action
+
+before_script:
+  - cd Cadastro-Clientes
+
+variables:
+  MAVEN_CLI_OPTS: "-s .m2/settings.xml --batch-mode"
+  MAVEN_OPTS: "-Dmaven.repo.local=.m2/repository"
+
+cache:
+  key: ${CI_COMMIT_REF_SLUG}
+  paths:
+    - .m2/repository/
+    - target/
+    - ./
+
+# ========== BUILD ==========
+
+BUILD:
+  stage: build
+  script:
+    - mvn compile
+  only:
+    - /^(master|release-v-.+|(feature|hotfix)-.+)$/
+
+# ========== TEST ==========
+
+TEST:
+  stage: test
+  script:
+    - mvn test
+  only:
+    - /^(feature|hotfix)-.+$/
+
+# ========== PACKAGE ==========
+
+PACKAGE:
+  stage: package
+  artifacts:
+    name: "$CI_JOB_NAME-$CI_COMMIT_REF_NAME"
+    when: on_failure
+    expire_in: 1h
+    paths:
+      - target/*.jar
+  script:
+    - mvn package -DskipTests
+  only:
+    - /^master|(release-v-.+)$/
+
+# ========== QUALITY ==========
+
+QUALITY_COMMON: &common_quality
+  variables:
+    APP_NAME: "cadastro-clientes-maven"
+  when: always
+  script:
+    - apt-get update -qy
+  only:
+    - /^(feature|hotfix)-.*$/
+
+QUALITY:INIT:
+  <<: *common_quality
+  stage: create
+  when: manual
+  script:
+    - curl https://cli-assets.heroku.com/install-ubuntu.sh | sh
+  allow_failure: true
+  environment:
+    name: homologation/quality
+    url: https://$APP_NAME.herokuapp.com/
+    on_stop: QUALITY:STOP
+    action: start
+
+QUALITY:DEPLOY:
+  <<: *common_quality
+  stage: deploy
+  dependencies:
+    - QUALITY:INIT
+  when: manual
+  script:
+    - mvn package -DskipTests
+    - apt-get update -qy
+    - apt-get install -y ruby-dev
+    - gem install dpl
+    - dpl --provider=heroku --app=$APP_NAME --api-key=$TOKEN_APP
+  allow_failure: false
+  environment:
+    name: homologation/quality/deploy
+    action: start
+
+QUALITY:STOP:
+  <<: *common_quality
+  stage: deploy
+  dependencies:
+    - QUALITY:INIT
+  when: manual
+  script:
+    - apt-get update -qy
+    - apt-get install -y curl
+    - curl https://cli-assets.heroku.com/install-ubuntu.sh | sh
+    - heroku destroy $APP_NAME --confirm $APP_NAME
+  environment:
+    name: homologation/quality
+    action: stop
+
+QUALITY:ACCEPT:
+  <<: *common_quality
+  stage: action
+  when: manual
+  dependencies:
+    - QUALITY:DEPLOY
+  script: 
+    - apt-get update -qy
+    - apt-get install -y curl
+    - curl https://cli-assets.heroku.com/install-ubuntu.sh | sh
+    - heroku destroy $APP_NAME --confirm $APP_NAME
+  allow_failure: false
+  environment:
+    name: homologation/quality/accept
+    action: start
+
+# ========= HOMOLOGATION ==========
+
+HOMOLOGATION_COMMON: &common_homologation
+  allow_failure: false
+  when: always
+  script:
+    - apt-get update -qy
+  only:
+    - master
+
+HOMOLOGATION:
+  <<: *common_homologation
+  stage: deploy
+  when: manual
+  variables:
+    APP_NAME: homologation-cadastro-clientes
+  script:
+    - apt-get update -qy
+    - apt-get install -y ruby-dev
+    - gem install dpl
+    - dpl --provider=heroku --app=$NOME_APP --api-key=$TOKEN_APP
+  environment:
+    name: homologation
+    url: https://$APP_NAME.herokuapp.com/
+    action: start
+
+HOMOLOGATION:ACCEPT:
+  <<: *common_homologation
+  stage: action
+  when: manual
+  script:
+    - git tag release-v-final
+  environment:
+    name: homologation
+    action: start
+
+# ========== PRODUCTION ==========
+
+PRODUCTION:
+  stage: deploy
+  when: manual 
+  variables:
+    APP_NAME: "cadastro-clientes-maven"
+  script:
+    - apt-get update -qy
+    - apt-get install -y ruby-dev
+    - gem install dpl
+    - dpl --provider=heroku --app=$NOME_APP --api-key=$TOKEN_APP
+  environment:
+    name: production
+    url: https://$APP_NAME.herokuapp.com/
+    action: start
+  only:
+    - /^release\/V.+$/
